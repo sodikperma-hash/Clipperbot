@@ -1,6 +1,8 @@
 import os
 import telebot
 from openai import OpenAI
+import yt_dlp
+import subprocess
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -49,5 +51,32 @@ Transcript:
     )
 
     bot.reply_to(message, response.choices[0].message.content)
+    
+@bot.message_handler(commands=['yt'])
+def handle_yt(message):
+    url = message.text.replace("/yt", "").strip()
 
-bot.polling()
+    if not url:
+        bot.reply_to(message, "Kirim link YouTube setelah command.\nContoh:\n/yt https://youtube.com/xxxx")
+        return
+
+    bot.reply_to(message, "Sedang download video...")
+
+    ydl_opts = {
+        'format': 'mp4',
+        'outtmpl': 'video.mp4'
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        with open("video.mp4", "rb") as video:
+            bot.send_video(message.chat.id, video)
+
+        bot.reply_to(message, "Video berhasil dikirim.")
+
+    except Exception as e:
+        bot.reply_to(message, f"Gagal download video: {e}")
+
+bot.polling()   
