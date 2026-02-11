@@ -1,174 +1,99 @@
 import os
+import shutil
 import telebot
-from openai import OpenAI
-import yt_dlp
-import subprocess
-import signal
-import sys
-import json
-import math
+from yt_dlp import YoutubeDL
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not BOT_TOKEN:
+if BOT_TOKEN is None:
     raise ValueError("BOT_TOKEN NOT FOUND")
 
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY NOT FOUND")
-
 bot = telebot.TeleBot(BOT_TOKEN)
-client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ===========================
-# BASIC COMMANDS
-# ===========================
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-@bot.message_handler(commands=['start'])
-def send_start(message):
-    bot.reply_to(message, "🎬 Kirim:\n/yt LINK_YOUTUBE\nSaya akan buat short otomatis dengan subtitle 🔥")
 
-@bot.message_handler(commands=['help'])
-def send_help(message):
-    bot.reply_to(message, "Gunakan:\n/yt https://youtube.com/xxxxx")
+def check_ffmpeg():
+    """Cek apakah ffmpeg tersedia di server"""
+    return shutil.which("ffmpeg") is not None
 
-# ===========================
-# MAIN AI SHORTS FUNCTION
-# ===========================
 
-@bot.message_handler(commands=['yt'])
-def handle_yt(message):
-    chat_id = message.chat.id
-    url = message.text.replace("/yt", "").strip()
-
-    if not url:
-        bot.reply_to(message, "Masukkan link YouTube.\nContoh:\n/yt https://youtube.com/xxxx")
-        return
-
-    bot.reply_to(message, "📥 Downloading video...")
-
+def download_youtube(url: str):
+    """Download video YouTube dan return path file"""
     ydl_opts = {
-        "format": "best[ext=mp4]/best",
-        "outtmpl": "video.mp4",
-        "noplaylist": True
+        "outtmpl": f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
+        "format": "mp4/bestaudio/best",
+        "noplaylist": True,
+        "quiet": True,
+        "merge_output_format": "mp4",
     }
 
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        file_path = ydl.prepare_filename(info)
+
+        # Kalau hasilnya bukan mp4 (kadang webm), cari mp4 versi merge
+        if not file_path.endswith(".mp4"):
+            base = os.path.splitext(file_path)[0]
+            mp4_path = base + ".mp4"
+            if os.path.exists(mp4_path):
+                file_path = mp4_path
+
+        return file_path
+
+
+@bot.message_handler(commands=["start"])
+def start(message):
+    bot.reply_to(
+        message,
+        "Halo 😎\n\nKirim perintah:\n/yt <link_youtube>\n\nContoh:\n/yt https://youtu.be/xxxxx"
+    )
+
+
+@bot.message_handler(commands=["yt"])
+def yt_handler(message):
     try:
-        # DOWNLOAD VIDEO
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        text = message.text.strip()
 
-        # EXTRACT AUDIO
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", "video.mp4",
-            "-vn",
-            "-acodec", "mp3",
-            "audio.mp3"
-        ])
+        if len(text.split()) < 2:
+            bot.reply_to(message, "Format salah.\n\nContoh:\n/yt https://youtu.be/xxxxx")
+            return
 
-        bot.reply_to(message, "🧠 Menganalisa audio dengan AI...")
+        url = text.split(maxsplit=1)[1].strip()
 
-        # TRANSCRIBE WITH WHISPER
-        audio_file = open("audio.mp3", "rb")
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file,
-            response_format="verbose_json"
-        )
+        bot.reply_to(message, "📥 Downloading video...")
 
-        full_text = transcript.text
+        # Cek ffmpeg dulu
+        if not check_ffmpeg():
+            bot.reply_to(
+                message,
+                "❌ ERROR: ffmpeg tidak ditemukan.\n\n"
+                "Solusi:\n"
+                "Ubuntu/Debian:\n"
+                "sudo apt update && sudo apt install -y ffmpeg\n\n"
+                "Setelah itu jalankan ulang bot."
+            )
+            return
 
-        # AI PILIH BAGIAN TERBAIK
-        prompt = f"""
-Dari transcript berikut, pilih 1 bagian paling viral untuk konten short.
+        # Download
+        file_path = download_youtube(url)
 
-Kriteria:
-- Emosional
-- Bisa jadi hook kuat
-- Maksimal 45 detik
+        if not os.path.exists(file_path):
+            bot.reply_to(message, "❌ Gagal download video (file tidak ditemukan).")
+            return
 
-Jawab format JSON:
-{{
-"start": detik,
-"end": detik,
-"hook": "judul pendek"
-}}
+        # Kirim ke Telegram
+        with open(file_path, "rb") as video:
+            bot.send_video(message.chat.id, video)
 
-Transcript:
-{full_text}
-"""
-
-        ai_response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        result = json.loads(ai_response.choices[0].message.content)
-
-        start_time = str(result["start"])
-        end_time = str(result["end"])
-        hook_text = result["hook"]
-
-        bot.reply_to(message, f"✂ Memotong bagian terbaik...\nHOOK: {hook_text}")
-
-        # CUT VIDEO
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", "video.mp4",
-            "-ss", start_time,
-            "-to", end_time,
-            "-c", "copy",
-            "clip.mp4"
-        ])
-
-        # FORMAT 9:16
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", "clip.mp4",
-            "-vf",
-            "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
-            "short.mp4"
-        ])
-
-        # BUAT SUBTITLE FILE
-        with open("subtitle.srt", "w", encoding="utf-8") as f:
-            f.write("1\n")
-            f.write("00:00:00,000 --> 00:00:03,000\n")
-            f.write(hook_text + "\n")
-
-        # BURN SUBTITLE
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", "short.mp4",
-            "-vf", "subtitles=subtitle.srt",
-            "final.mp4"
-        ])
-
-        bot.reply_to(message, "📤 Mengirim hasil...")
-
-        with open("final.mp4", "rb") as vid:
-            bot.send_document(chat_id, vid)
-
-        bot.reply_to(message, "✅ Selesai!")
-
-        # CLEAN UP
-        for file in ["video.mp4", "audio.mp3", "clip.mp4", "short.mp4", "subtitle.srt", "final.mp4"]:
-            if os.path.exists(file):
-                os.remove(file)
+        # Hapus file setelah terkirim
+        os.remove(file_path)
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Error: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
-# ===========================
-# SAFE SHUTDOWN
-# ===========================
 
-def signal_handler(sig, frame):
-    print("Shutting down gracefully...")
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, signal_handler)
-
-bot.remove_webhook()
-bot.infinity_polling(timeout=60, long_polling_timeout=60)
+if __name__ == "__main__":
+    print("Bot running...")
+    bot.infinity_polling()
