@@ -24,20 +24,24 @@ def send_start(message):
 def send_help(message):
     bot.reply_to(message, "Kirim teks transcript.\nSaya akan buat:\n- 5 momen viral\n- 5 hook kuat\n- 3 caption\n- 3 judul SEO")
 
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    transcript = message.text
+@bot.message_handler(commands=['clip'])
+def handle_clip(message):
+    transcript = message.text.replace("/clip", "").strip()
+
+    if not transcript:
+        bot.reply_to(message, "Kirim transcript setelah command.\n\nContoh:\n/clip Di video ini saya membahas...")
+        return
 
     prompt = f"""
-    Analisa transcript berikut:
-    1. Cari 5 momen viral.
-    2. Buat 5 hook kuat.
-    3. Buat 3 caption TikTok.
-    4. Buat 3 judul SEO.
+Analisa transcript berikut:
+1. Cari 5 momen viral.
+2. Buat 5 hook kuat.
+3. Buat 3 caption TikTok.
+4. Buat 3 judul SEO.
 
-    Transcript:
-    {transcript}
-    """
+Transcript:
+{transcript}
+"""
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
