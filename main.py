@@ -1,10 +1,18 @@
-
 import os
 import telebot
 from openai import OpenAI
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+print("DEBUG BOT_TOKEN:", BOT_TOKEN)
+print("DEBUG OPENAI_API_KEY:", OPENAI_API_KEY)
+
+if BOT_TOKEN is None:
+    raise ValueError("BOT_TOKEN NOT FOUND")
+
+if OPENAI_API_KEY is None:
+    raise ValueError("OPENAI_API_KEY NOT FOUND")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
