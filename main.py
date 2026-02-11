@@ -3,6 +3,8 @@ import telebot
 from openai import OpenAI
 import yt_dlp
 import subprocess
+import signal
+import sys
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -80,4 +82,10 @@ def handle_yt(message):
     except Exception as e:
         bot.reply_to(message, f"Gagal download video: {e}")
 
-bot.polling(none_stop=True)  
+def signal_handler(sig, frame):
+    print("Shutting down gracefully...")
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
+
+bot.infinity_polling(timeout=60, long_polling_timeout=60) 
