@@ -16,6 +16,13 @@ if OPENAI_API_KEY is None:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
+@bot.message_handler(commands=['start'])
+def send_start(message):
+    bot.reply_to(message, "Halo! Kirim transcript video dan saya akan ubah jadi konten viral 🔥")
+
+@bot.message_handler(commands=['help'])
+def send_help(message):
+    bot.reply_to(message, "Kirim teks transcript.\nSaya akan buat:\n- 5 momen viral\n- 5 hook kuat\n- 3 caption\n- 3 judul SEO")
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
