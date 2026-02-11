@@ -64,11 +64,11 @@ def handle_yt(message):
 
     bot.reply_to(message, "Sedang download video...")
 
-    ydl_opts = {
-    "format": "worst[height<=360]",
+ydl_opts = {
+    "format": "worst[height<=144]",
     "outtmpl": "video.mp4",
     "noplaylist": True
-    }
+}
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
