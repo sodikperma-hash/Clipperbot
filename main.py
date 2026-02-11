@@ -9,9 +9,6 @@ import sys
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-print("DEBUG BOT_TOKEN:", BOT_TOKEN)
-print("DEBUG OPENAI_API_KEY:", OPENAI_API_KEY)
-
 if BOT_TOKEN is None:
     raise ValueError("BOT_TOKEN NOT FOUND")
 
@@ -65,9 +62,9 @@ def handle_yt(message):
     bot.reply_to(message, "Sedang download video...")
 
     ydl_opts = {
-        "format": "worst[height<=144]",
-        "outtmpl": "video.mp4",
-        "noplaylist": True
+    "format": "best[ext=mp4]/best",
+    "outtmpl": "video.%(ext)s",
+    "noplaylist": True
     }
 
     try:
