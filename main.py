@@ -63,8 +63,9 @@ def handle_yt(message):
     bot.reply_to(message, "Sedang download video...")
 
     ydl_opts = {
-        'format': 'mp4',
-        'outtmpl': 'video.mp4'
+    "format": "worst[height<=360]",
+    "outtmpl": "video.mp4",
+    "noplaylist": True
     }
 
     try:
@@ -79,4 +80,4 @@ def handle_yt(message):
     except Exception as e:
         bot.reply_to(message, f"Gagal download video: {e}")
 
-bot.polling()   
+bot.polling(none_stop=True)  
