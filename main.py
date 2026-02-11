@@ -88,4 +88,5 @@ def signal_handler(sig, frame):
 
 signal.signal(signal.SIGTERM, signal_handler)
 
-bot.infinity_polling(timeout=60, long_polling_timeout=60) 
+bot.remove_webhook()
+bot.infinity_polling(timeout=60, long_polling_timeout=60)
