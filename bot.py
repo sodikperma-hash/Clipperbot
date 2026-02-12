@@ -1,52 +1,65 @@
 import os
 import telebot
 import yt_dlp
-import whisper
 import subprocess
 from openai import OpenAI
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN NOT FOUND")
+
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY NOT FOUND")
+
 bot = telebot.TeleBot(BOT_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-model = whisper.load_model("base")
 
+# ===============================
+# UTIL FUNCTIONS
+# ===============================
 
-# =============================
-# DOWNLOAD YOUTUBE
-# =============================
 def download_video(url):
     ydl_opts = {
-        "format": "best",
-        "outtmpl": "video.%(ext)s",
+        "format": "best[ext=mp4]/best",
+        "outtmpl": "video.mp4",
         "noplaylist": True
     }
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-    return "video.mp4"
 
 
-# =============================
-# TRANSCRIBE
-# =============================
-def transcribe_video(path):
-    result = model.transcribe(path)
-    return result
+def extract_audio():
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", "video.mp4",
+        "-vn",
+        "-acodec", "mp3",
+        "audio.mp3"
+    ])
 
 
-# =============================
-# FIND VIRAL MOMENT (AI)
-# =============================
-def find_best_segment(transcript_text):
+def transcribe_audio():
+    with open("audio.mp3", "rb") as audio_file:
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file
+        )
+    return transcript.text
+
+
+def find_best_moment(transcript):
     prompt = f"""
-Pilih bagian paling emosional dan viral dari transcript ini.
-Berikan waktu mulai dalam detik saja (angka).
-Durasi maksimal 60 detik.
+Dari transcript berikut, pilih bagian paling menarik dan viral.
+Berikan jawaban dalam format:
+START:detik
+END:detik
 
 Transcript:
-{transcript_text}
+{transcript}
 """
 
     response = client.chat.completions.create(
@@ -54,114 +67,107 @@ Transcript:
         messages=[{"role": "user", "content": prompt}],
     )
 
-    start_time = int(''.join(filter(str.isdigit, response.choices[0].message.content)))
-    return start_time
+    text = response.choices[0].message.content
+
+    try:
+        start = int(text.split("START:")[1].split("\n")[0])
+        end = int(text.split("END:")[1].split("\n")[0])
+    except:
+        start = 0
+        end = 60
+
+    if end - start > 60:
+        end = start + 60
+
+    return start, end
 
 
-# =============================
-# CUT 60 DETIK
-# =============================
-def cut_video(start):
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-ss", str(start),
+def cut_video(start, end):
+    subprocess.run([
+        "ffmpeg", "-y",
         "-i", "video.mp4",
-        "-t", "60",
-        "-vf", "scale=1080:1920",
+        "-ss", str(start),
+        "-to", str(end),
+        "-c", "copy",
         "clip.mp4"
-    ]
-    subprocess.run(cmd)
+    ])
 
 
-# =============================
-# GENERATE SRT DENGAN WARNA
-# =============================
-def generate_srt(result, start):
-    segments = result["segments"]
-    with open("sub.srt", "w", encoding="utf-8") as f:
-        index = 1
-        for seg in segments:
-            if seg["start"] >= start and seg["start"] <= start + 60:
-                text = seg["text"].strip()
+def generate_srt(transcript):
+    lines = transcript.split(".")
+    srt_content = ""
+    index = 1
+    time_cursor = 0
 
-                # highlight kata kuat
-                words = text.split()
-                if len(words) > 3:
-                    words[0] = f"<font color='#00FF00'>{words[0]}</font>"
-                text = " ".join(words)
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
 
-                start_time = seg["start"] - start
-                end_time = seg["end"] - start
+        start_time = time_cursor
+        end_time = time_cursor + 4
 
-                f.write(f"{index}\n")
-                f.write(f"{format_time(start_time)} --> {format_time(end_time)}\n")
-                f.write(text + "\n\n")
-                index += 1
+        srt_content += f"{index}\n"
+        srt_content += f"00:00:{start_time:02d},000 --> 00:00:{end_time:02d},000\n"
+        srt_content += f"{line}\n\n"
 
+        index += 1
+        time_cursor += 4
 
-def format_time(seconds):
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds - int(seconds)) * 1000)
-    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+    with open("subtitle.srt", "w", encoding="utf-8") as f:
+        f.write(srt_content)
 
 
-# =============================
-# RENDER FINAL VIDEO
-# =============================
-def render_final():
-    hook_text = "INI MOMEN PALING GILA"
-
-    cmd = [
-        "ffmpeg",
-        "-y",
+def burn_subtitle():
+    subprocess.run([
+        "ffmpeg", "-y",
         "-i", "clip.mp4",
-        "-vf",
-        f"subtitles=sub.srt:force_style='Fontsize=48,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=3,Outline=2,Shadow=1,Alignment=2,MarginV=120',"
-        f"drawtext=text='{hook_text}':fontcolor=black:fontsize=60:box=1:boxcolor=white@0.9:x=(w-text_w)/2:y=100",
+        "-vf", "subtitles=subtitle.srt:force_style='Fontsize=24,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3'",
         "-c:a", "copy",
         "final.mp4"
-    ]
-    subprocess.run(cmd)
+    ])
 
 
-# =============================
+# ===============================
 # TELEGRAM COMMAND
-# =============================
-@bot.message_handler(commands=['yt'])
+# ===============================
+
+@bot.message_handler(commands=["yt"])
 def handle_yt(message):
     url = message.text.replace("/yt", "").strip()
 
     if not url:
-        bot.reply_to(message, "Kirim link setelah /yt")
+        bot.reply_to(message, "Kirim link YouTube setelah command.\nContoh:\n/yt https://youtube.com/xxxx")
         return
 
     bot.reply_to(message, "⬇️ Download video...")
     download_video(url)
 
+    bot.reply_to(message, "🎧 Extract audio...")
+    extract_audio()
+
     bot.reply_to(message, "🧠 Transcribe...")
-    result = transcribe_video("video.mp4")
+    transcript = transcribe_audio()
 
-    transcript_text = " ".join([seg["text"] for seg in result["segments"]])
+    bot.reply_to(message, "🔥 Cari moment terbaik...")
+    start, end = find_best_moment(transcript)
 
-    bot.reply_to(message, "🔥 Mencari momen viral...")
-    start = find_best_segment(transcript_text)
+    bot.reply_to(message, f"✂️ Potong dari {start}s sampai {end}s...")
+    cut_video(start, end)
 
-    bot.reply_to(message, "✂️ Memotong 60 detik...")
-    cut_video(start)
+    bot.reply_to(message, "📝 Generate subtitle...")
+    generate_srt(transcript)
 
-    bot.reply_to(message, "📝 Menambahkan subtitle...")
-    generate_srt(result, start)
+    bot.reply_to(message, "🎬 Render subtitle...")
+    burn_subtitle()
 
-    bot.reply_to(message, "🎬 Rendering final...")
-    render_final()
+    bot.reply_to(message, "📤 Kirim clip...")
 
     with open("final.mp4", "rb") as video:
         bot.send_video(message.chat.id, video)
 
-    bot.reply_to(message, "✅ Selesai! Siap upload Shorts 🔥")
+    bot.reply_to(message, "✅ Selesai!")
 
 
+print("Bot is running...")
 bot.infinity_polling()
