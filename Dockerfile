@@ -1,15 +1,11 @@
-FROM python:3.11-slim
+FROM python:3.10
 
-WORKDIR /app
-
-# Install ffmpeg
 RUN apt-get update && apt-get install -y ffmpeg
 
-# Copy project
+RUN pip install --upgrade pip
+RUN pip install openai openai-whisper yt-dlp pyTelegramBotAPI
+
+WORKDIR /app
 COPY . .
 
-# Install python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Start bot
 CMD ["python", "bot.py"]
