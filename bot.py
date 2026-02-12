@@ -1,12 +1,11 @@
 import os
 import telebot
+from openai import OpenAI
 import yt_dlp
 import subprocess
-from openai import OpenAI
-
-# ==============================
-# ENV
-# ==============================
+import signal
+import sys
+import uuid
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -14,108 +13,86 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN NOT FOUND")
 
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY NOT FOUND")
+
 bot = telebot.TeleBot(BOT_TOKEN)
-
-if OPENAI_API_KEY:
-    client = OpenAI(api_key=OPENAI_API_KEY)
-else:
-    client = None
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# ==============================
-# START / HELP
-# ==============================
-
+# =========================
+# START COMMAND
+# =========================
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "🎬 Clipper Bot Aktif!\n\nKirim:\n/yt link_youtube")
+    bot.reply_to(message, "🔥 Kirim /yt + link YouTube\nSaya akan potong 60 detik dan kirim ulang.")
 
 
-@bot.message_handler(commands=['help'])
-def help_command(message):
-    bot.reply_to(message, "Gunakan:\n\n/yt https://youtube.com/xxxx")
-
-
-# ==============================
-# YOUTUBE DOWNLOAD
-# ==============================
-
+# =========================
+# YOUTUBE CLIP COMMAND
+# =========================
 @bot.message_handler(commands=['yt'])
-def download_video(message):
-
+def handle_yt(message):
     url = message.text.replace("/yt", "").strip()
 
     if not url:
-        bot.reply_to(message, "Masukkan link YouTube.\nContoh:\n/yt https://youtube.com/xxxx")
+        bot.reply_to(message, "Contoh:\n/yt https://youtube.com/xxxx")
         return
 
-    bot.reply_to(message, "📥 Downloading video...")
+    bot.reply_to(message, "⬇️ Downloading video...")
+
+    unique_id = str(uuid.uuid4())
+    raw_file = f"{unique_id}.mp4"
+    clip_file = f"clip_{unique_id}.mp4"
+
+    ydl_opts = {
+        "format": "best[ext=mp4]/best",
+        "outtmpl": raw_file,
+        "noplaylist": True
+    }
 
     try:
-        ydl_opts = {
-            "format": "bestvideo+bestaudio/best",
-            "outtmpl": "video.%(ext)s",
-            "noplaylist": True,
-            "merge_output_format": "mp4"
-        }
-
+        # DOWNLOAD VIDEO
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        filename = "video.mp4"
+        bot.reply_to(message, "✂️ Memotong 60 detik...")
 
-        # ==============================
-        # CEK SIZE
-        # ==============================
+        # POTONG 60 DETIK + COMPRESS
+        subprocess.run([
+            "ffmpeg",
+            "-i", raw_file,
+            "-t", "60",
+            "-vf", "scale=1280:-2",
+            "-vcodec", "libx264",
+            "-preset", "veryfast",
+            "-crf", "30",
+            "-acodec", "aac",
+            "-b:a", "96k",
+            clip_file
+        ])
 
-        file_size = os.path.getsize(filename) / (1024 * 1024)  # MB
+        bot.reply_to(message, "📤 Mengirim clip...")
 
-        # Jika lebih dari 49MB → compress
-        if file_size > 49:
-            bot.reply_to(message, "🎛 Compressing video...")
+        with open(clip_file, "rb") as video:
+            bot.send_video(message.chat.id, video)
 
-            compressed = "compressed.mp4"
-
-            subprocess.run([
-                "ffmpeg",
-                "-i", filename,
-                "-vcodec", "libx264",
-                "-crf", "28",
-                "-preset", "veryfast",
-                "-acodec", "aac",
-                "-b:a", "128k",
-                compressed
-            ])
-
-            filename = compressed
-            file_size = os.path.getsize(filename) / (1024 * 1024)
-
-        # ==============================
-        # KIRIM
-        # ==============================
-
-        if file_size <= 49:
-            with open(filename, "rb") as video:
-                bot.send_video(message.chat.id, video)
-        else:
-            with open(filename, "rb") as video:
-                bot.send_document(message.chat.id, video)
-
-        bot.reply_to(message, "✅ Selesai!")
-
-        # Hapus file
-        if os.path.exists("video.mp4"):
-            os.remove("video.mp4")
-        if os.path.exists("compressed.mp4"):
-            os.remove("compressed.mp4")
+        # HAPUS FILE
+        os.remove(raw_file)
+        os.remove(clip_file)
 
     except Exception as e:
         bot.reply_to(message, f"❌ ERROR: {e}")
 
 
-# ==============================
-# RUN
-# ==============================
+# =========================
+# GRACEFUL SHUTDOWN
+# =========================
+def signal_handler(sig, frame):
+    print("Shutting down...")
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
 
 bot.remove_webhook()
 bot.infinity_polling(timeout=60, long_polling_timeout=60)
