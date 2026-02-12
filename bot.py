@@ -9,13 +9,11 @@ import telebot
 from telebot import types
 
 # =========================
-# CONFIG
+# ENV
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN belum di-set di Railway Variables")
-
-MAX_SIZE = 100 * 1024 * 1024  # 100MB limit aman Railway
 
 BASE_DIR = Path(__file__).parent
 DOWNLOAD_DIR = BASE_DIR / "downloads"
@@ -33,11 +31,17 @@ def run_cmd(cmd):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=600
+            timeout=900
         )
         return p.returncode, p.stdout
     except Exception as e:
         return 1, str(e)
+
+
+def sanitize_filename(name):
+    name = re.sub(r"[^\w\s\-\.\(\)]", "", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:80] if name else "file"
 
 
 def human_size(num_bytes):
@@ -78,10 +82,9 @@ def download_media(url, mode="mp4"):
             url
         ]
     else:
-        # 🔥 IMPORTANT: LIMIT 720P BIAR TIDAK OOM
         cmd = [
             "yt-dlp",
-            "-f", "bv*[height<=720]+ba/best[height<=720]",
+            "-f", "bv*+ba/best",
             "--merge-output-format", "mp4",
             "--no-playlist",
             "-o", output_template,
@@ -97,63 +100,86 @@ def download_media(url, mode="mp4"):
     files = list(job_dir.glob("*"))
     if not files:
         clean_folder(job_dir)
-        raise RuntimeError("File tidak ditemukan setelah download.")
+        raise RuntimeError("Download selesai tapi file tidak ditemukan.")
 
     final_file = max(files, key=lambda p: p.stat().st_size)
-
-    size = final_file.stat().st_size
-
-    # 🔥 HARD LIMIT SIZE
-    if size > MAX_SIZE:
-        clean_folder(job_dir)
-        raise RuntimeError(
-            f"File terlalu besar ({human_size(size)}).\n"
-            "Maksimal 100MB.\nCoba video lebih pendek."
-        )
 
     return final_file
 
 
 # =========================
-# HANDLERS
+# COMMANDS
 # =========================
 @bot.message_handler(commands=["start", "help"])
 def start(msg):
     text = (
         "🔥 <b>ClipperBot</b>\n\n"
-        "Kirim link:\n"
-        "• YouTube\n"
-        "• TikTok\n"
-        "• Instagram (public)\n\n"
-        "Pilih format:\n"
-        "🎬 MP4\n"
-        "🎧 MP3\n"
+        "Gunakan:\n"
+        "• /yt https://youtube.com/xxxx\n"
+        "ATAU\n"
+        "• Kirim link langsung\n\n"
+        "Lalu pilih format download."
     )
     bot.reply_to(msg, text)
 
 
-@bot.message_handler(func=lambda m: True)
-def handle_link(msg):
-    url = msg.text.strip()
+# =========================
+# HANDLE /yt COMMAND
+# =========================
+@bot.message_handler(commands=["yt"])
+def handle_yt(msg):
+    parts = msg.text.split(maxsplit=1)
 
-    if not (url.startswith("http://") or url.startswith("https://")):
+    if len(parts) < 2:
+        bot.reply_to(msg, "❌ Format salah.\n\nContoh:\n/yt https://youtube.com/xxxx")
+        return
+
+    url = parts[1].strip()
+
+    if not url.startswith("http"):
         bot.reply_to(msg, "❌ Link harus diawali http/https.")
         return
 
+    show_download_options(msg, url)
+
+
+# =========================
+# HANDLE DIRECT LINK
+# =========================
+@bot.message_handler(func=lambda m: True)
+def handle_plain_link(msg):
+    text = msg.text.strip()
+
+    if not text.startswith("http"):
+        return  # abaikan selain link
+
+    show_download_options(msg, text)
+
+
+# =========================
+# SHOW BUTTONS
+# =========================
+def show_download_options(msg, url):
     kb = types.InlineKeyboardMarkup(row_width=2)
+
     btn_mp4 = types.InlineKeyboardButton(
         "🎬 Download MP4",
         callback_data=f"dl|mp4|{url}"
     )
+
     btn_mp3 = types.InlineKeyboardButton(
         "🎧 Download MP3",
         callback_data=f"dl|mp3|{url}"
     )
+
     kb.add(btn_mp4, btn_mp3)
 
     bot.reply_to(msg, "Pilih format download:", reply_markup=kb)
 
 
+# =========================
+# CALLBACK DOWNLOAD
+# =========================
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl|"))
 def callback_download(call):
     try:
@@ -162,21 +188,34 @@ def callback_download(call):
         bot.answer_callback_query(call.id, "Data error.")
         return
 
-    bot.answer_callback_query(call.id, "Diproses...")
+    bot.answer_callback_query(call.id, "⏳ Diproses...")
 
     chat_id = call.message.chat.id
+
     status = bot.send_message(chat_id, "⏳ Download dimulai...")
 
     try:
         file_path = download_media(url, mode=mode)
+
         size = file_path.stat().st_size
-        file_name = file_path.name
+        file_name = sanitize_filename(file_path.stem) + file_path.suffix
 
         bot.edit_message_text(
-            f"✅ Download selesai!\n📦 Size: {human_size(size)}\n⏳ Upload...",
+            f"📦 Size: <b>{human_size(size)}</b>\n⏳ Upload ke Telegram...",
             chat_id=chat_id,
             message_id=status.message_id
         )
+
+        # Batasi agar tidak OOM Railway
+        if size > 80 * 1024 * 1024:
+            bot.edit_message_text(
+                "❌ File terlalu besar untuk server Railway.\n"
+                "Gunakan video lebih pendek.",
+                chat_id=chat_id,
+                message_id=status.message_id
+            )
+            clean_folder(file_path.parent)
+            return
 
         with open(file_path, "rb") as f:
             if mode == "mp3":
@@ -185,7 +224,7 @@ def callback_download(call):
                 bot.send_video(chat_id, f, caption=f"🎬 {file_name}")
 
         bot.edit_message_text(
-            "✅ Selesai! Kirim link lain.",
+            "✅ Selesai! Kirim link lain kalau mau.",
             chat_id=chat_id,
             message_id=status.message_id
         )
@@ -194,7 +233,7 @@ def callback_download(call):
 
     except Exception as e:
         bot.edit_message_text(
-            f"❌ Gagal:\n\n{str(e)[:1000]}",
+            f"❌ Gagal.\n\n{str(e)[:1000]}",
             chat_id=chat_id,
             message_id=status.message_id
         )
