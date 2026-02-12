@@ -1,3 +1,4 @@
 pyTelegramBotAPI
-openai
 yt-dlp
+openai-whisper
+torch
