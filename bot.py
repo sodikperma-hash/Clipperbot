@@ -1,163 +1,167 @@
 import os
 import telebot
 import yt_dlp
+import whisper
 import subprocess
-import uuid
-import signal
-import sys
-import json
 from openai import OpenAI
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN NOT FOUND")
-
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY NOT FOUND")
-
 bot = telebot.TeleBot(BOT_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.reply_to(message, "🔥 Kirim /yt + link\nSaya akan:\n- Cari momen viral\n- Potong 60 detik\n- Tambah subtitle\n- Kirim clip")
+model = whisper.load_model("base")
 
 
+# =============================
+# DOWNLOAD YOUTUBE
+# =============================
+def download_video(url):
+    ydl_opts = {
+        "format": "best",
+        "outtmpl": "video.%(ext)s",
+        "noplaylist": True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    return "video.mp4"
+
+
+# =============================
+# TRANSCRIBE
+# =============================
+def transcribe_video(path):
+    result = model.transcribe(path)
+    return result
+
+
+# =============================
+# FIND VIRAL MOMENT (AI)
+# =============================
+def find_best_segment(transcript_text):
+    prompt = f"""
+Pilih bagian paling emosional dan viral dari transcript ini.
+Berikan waktu mulai dalam detik saja (angka).
+Durasi maksimal 60 detik.
+
+Transcript:
+{transcript_text}
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    start_time = int(''.join(filter(str.isdigit, response.choices[0].message.content)))
+    return start_time
+
+
+# =============================
+# CUT 60 DETIK
+# =============================
+def cut_video(start):
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss", str(start),
+        "-i", "video.mp4",
+        "-t", "60",
+        "-vf", "scale=1080:1920",
+        "clip.mp4"
+    ]
+    subprocess.run(cmd)
+
+
+# =============================
+# GENERATE SRT DENGAN WARNA
+# =============================
+def generate_srt(result, start):
+    segments = result["segments"]
+    with open("sub.srt", "w", encoding="utf-8") as f:
+        index = 1
+        for seg in segments:
+            if seg["start"] >= start and seg["start"] <= start + 60:
+                text = seg["text"].strip()
+
+                # highlight kata kuat
+                words = text.split()
+                if len(words) > 3:
+                    words[0] = f"<font color='#00FF00'>{words[0]}</font>"
+                text = " ".join(words)
+
+                start_time = seg["start"] - start
+                end_time = seg["end"] - start
+
+                f.write(f"{index}\n")
+                f.write(f"{format_time(start_time)} --> {format_time(end_time)}\n")
+                f.write(text + "\n\n")
+                index += 1
+
+
+def format_time(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int((seconds - int(seconds)) * 1000)
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+
+# =============================
+# RENDER FINAL VIDEO
+# =============================
+def render_final():
+    hook_text = "INI MOMEN PALING GILA"
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", "clip.mp4",
+        "-vf",
+        f"subtitles=sub.srt:force_style='Fontsize=48,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=3,Outline=2,Shadow=1,Alignment=2,MarginV=120',"
+        f"drawtext=text='{hook_text}':fontcolor=black:fontsize=60:box=1:boxcolor=white@0.9:x=(w-text_w)/2:y=100",
+        "-c:a", "copy",
+        "final.mp4"
+    ]
+    subprocess.run(cmd)
+
+
+# =============================
+# TELEGRAM COMMAND
+# =============================
 @bot.message_handler(commands=['yt'])
 def handle_yt(message):
     url = message.text.replace("/yt", "").strip()
 
     if not url:
-        bot.reply_to(message, "Contoh:\n/yt https://youtube.com/xxxx")
+        bot.reply_to(message, "Kirim link setelah /yt")
         return
 
-    bot.reply_to(message, "⬇️ Downloading video & transcript...")
+    bot.reply_to(message, "⬇️ Download video...")
+    download_video(url)
 
-    unique_id = str(uuid.uuid4())
-    raw_file = f"{unique_id}.mp4"
-    clip_file = f"clip_{unique_id}.mp4"
-    final_file = f"final_{unique_id}.mp4"
+    bot.reply_to(message, "🧠 Transcribe...")
+    result = transcribe_video("video.mp4")
 
-    ydl_opts = {
-        "format": "best[ext=mp4]/best",
-        "outtmpl": raw_file,
-        "noplaylist": True,
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["id", "en"],
-        "skip_download": False
-    }
+    transcript_text = " ".join([seg["text"] for seg in result["segments"]])
 
-    try:
-        # DOWNLOAD VIDEO + SUBTITLE
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+    bot.reply_to(message, "🔥 Mencari momen viral...")
+    start = find_best_segment(transcript_text)
 
-        duration = info.get("duration", 0)
+    bot.reply_to(message, "✂️ Memotong 60 detik...")
+    cut_video(start)
 
-        # CARI FILE SRT
-        transcript_text = ""
-        for file in os.listdir():
-            if file.endswith(".vtt"):
-                with open(file, "r", encoding="utf-8") as f:
-                    transcript_text = f.read()
-                break
+    bot.reply_to(message, "📝 Menambahkan subtitle...")
+    generate_srt(result, start)
 
-        if not transcript_text:
-            bot.reply_to(message, "❌ Subtitle tidak tersedia di YouTube.")
-            return
+    bot.reply_to(message, "🎬 Rendering final...")
+    render_final()
 
-        bot.reply_to(message, "🧠 AI mencari momen paling viral...")
+    with open("final.mp4", "rb") as video:
+        bot.send_video(message.chat.id, video)
 
-        prompt = f"""
-Berikut transcript video YouTube.
-
-Tugas:
-1. Tentukan timestamp paling viral dan emosional.
-2. Berikan jawaban dalam format JSON:
-{{ "start": detik_mulai }}
-
-Transcript:
-{transcript_text[:8000]}
-"""
-
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        result = response.choices[0].message.content.strip()
-
-        # Ambil angka dari JSON
-        start_time = json.loads(result)["start"]
-
-        # Pastikan tidak lebih dari durasi
-        if start_time + 60 > duration:
-            start_time = max(0, duration - 60)
-
-        bot.reply_to(message, f"✂️ Memotong 60 detik dari detik {start_time}...")
-
-        # POTONG VIDEO
-        subprocess.run([
-            "ffmpeg",
-            "-ss", str(start_time),
-            "-i", raw_file,
-            "-t", "60",
-            "-vf", "scale=1280:-2",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "28",
-            "-c:a", "aac",
-            clip_file
-        ])
-
-        bot.reply_to(message, "📝 Generate subtitle...")
-
-        # GENERATE SRT DENGAN WHISPER
-        subprocess.run([
-            "whisper",
-            clip_file,
-            "--model", "tiny",
-            "--language", "Indonesian",
-            "--output_format", "srt"
-        ])
-
-        srt_file = clip_file.replace(".mp4", ".srt")
-
-        bot.reply_to(message, "🎬 Menempelkan subtitle...")
-
-        subprocess.run([
-            "ffmpeg",
-            "-i", clip_file,
-            "-vf", f"subtitles={srt_file}",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "28",
-            "-c:a", "copy",
-            final_file
-        ])
-
-        bot.reply_to(message, "📤 Mengirim clip...")
-
-        with open(final_file, "rb") as video:
-            bot.send_video(message.chat.id, video)
-
-        # CLEAN UP
-        for file in os.listdir():
-            if unique_id in file:
-                os.remove(file)
-
-    except Exception as e:
-        bot.reply_to(message, f"❌ ERROR: {e}")
+    bot.reply_to(message, "✅ Selesai! Siap upload Shorts 🔥")
 
 
-def signal_handler(sig, frame):
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, signal_handler)
-
-bot.remove_webhook()
-bot.infinity_polling(timeout=60, long_polling_timeout=60)
+bot.infinity_polling()
