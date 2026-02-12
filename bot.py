@@ -1,11 +1,12 @@
 import os
 import telebot
-from openai import OpenAI
 import yt_dlp
 import subprocess
+import uuid
 import signal
 import sys
-import uuid
+import json
+from openai import OpenAI
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -20,17 +21,11 @@ bot = telebot.TeleBot(BOT_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# =========================
-# START COMMAND
-# =========================
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "🔥 Kirim /yt + link YouTube\nSaya akan potong 60 detik dan kirim ulang.")
+    bot.reply_to(message, "🔥 Kirim /yt + link\nSaya akan:\n- Cari momen viral\n- Potong 60 detik\n- Tambah subtitle\n- Kirim clip")
 
 
-# =========================
-# YOUTUBE CLIP COMMAND
-# =========================
 @bot.message_handler(commands=['yt'])
 def handle_yt(message):
     url = message.text.replace("/yt", "").strip()
@@ -39,57 +34,127 @@ def handle_yt(message):
         bot.reply_to(message, "Contoh:\n/yt https://youtube.com/xxxx")
         return
 
-    bot.reply_to(message, "⬇️ Downloading video...")
+    bot.reply_to(message, "⬇️ Downloading video & transcript...")
 
     unique_id = str(uuid.uuid4())
     raw_file = f"{unique_id}.mp4"
     clip_file = f"clip_{unique_id}.mp4"
+    final_file = f"final_{unique_id}.mp4"
 
     ydl_opts = {
         "format": "best[ext=mp4]/best",
         "outtmpl": raw_file,
-        "noplaylist": True
+        "noplaylist": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["id", "en"],
+        "skip_download": False
     }
 
     try:
-        # DOWNLOAD VIDEO
+        # DOWNLOAD VIDEO + SUBTITLE
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            info = ydl.extract_info(url, download=True)
 
-        bot.reply_to(message, "✂️ Memotong 60 detik...")
+        duration = info.get("duration", 0)
 
-        # POTONG 60 DETIK + COMPRESS
+        # CARI FILE SRT
+        transcript_text = ""
+        for file in os.listdir():
+            if file.endswith(".vtt"):
+                with open(file, "r", encoding="utf-8") as f:
+                    transcript_text = f.read()
+                break
+
+        if not transcript_text:
+            bot.reply_to(message, "❌ Subtitle tidak tersedia di YouTube.")
+            return
+
+        bot.reply_to(message, "🧠 AI mencari momen paling viral...")
+
+        prompt = f"""
+Berikut transcript video YouTube.
+
+Tugas:
+1. Tentukan timestamp paling viral dan emosional.
+2. Berikan jawaban dalam format JSON:
+{{ "start": detik_mulai }}
+
+Transcript:
+{transcript_text[:8000]}
+"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        result = response.choices[0].message.content.strip()
+
+        # Ambil angka dari JSON
+        start_time = json.loads(result)["start"]
+
+        # Pastikan tidak lebih dari durasi
+        if start_time + 60 > duration:
+            start_time = max(0, duration - 60)
+
+        bot.reply_to(message, f"✂️ Memotong 60 detik dari detik {start_time}...")
+
+        # POTONG VIDEO
         subprocess.run([
             "ffmpeg",
+            "-ss", str(start_time),
             "-i", raw_file,
             "-t", "60",
             "-vf", "scale=1280:-2",
-            "-vcodec", "libx264",
+            "-c:v", "libx264",
             "-preset", "veryfast",
-            "-crf", "30",
-            "-acodec", "aac",
-            "-b:a", "96k",
+            "-crf", "28",
+            "-c:a", "aac",
             clip_file
+        ])
+
+        bot.reply_to(message, "📝 Generate subtitle...")
+
+        # GENERATE SRT DENGAN WHISPER
+        subprocess.run([
+            "whisper",
+            clip_file,
+            "--model", "tiny",
+            "--language", "Indonesian",
+            "--output_format", "srt"
+        ])
+
+        srt_file = clip_file.replace(".mp4", ".srt")
+
+        bot.reply_to(message, "🎬 Menempelkan subtitle...")
+
+        subprocess.run([
+            "ffmpeg",
+            "-i", clip_file,
+            "-vf", f"subtitles={srt_file}",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "28",
+            "-c:a", "copy",
+            final_file
         ])
 
         bot.reply_to(message, "📤 Mengirim clip...")
 
-        with open(clip_file, "rb") as video:
+        with open(final_file, "rb") as video:
             bot.send_video(message.chat.id, video)
 
-        # HAPUS FILE
-        os.remove(raw_file)
-        os.remove(clip_file)
+        # CLEAN UP
+        for file in os.listdir():
+            if unique_id in file:
+                os.remove(file)
 
     except Exception as e:
         bot.reply_to(message, f"❌ ERROR: {e}")
 
 
-# =========================
-# GRACEFUL SHUTDOWN
-# =========================
 def signal_handler(sig, frame):
-    print("Shutting down...")
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, signal_handler)
